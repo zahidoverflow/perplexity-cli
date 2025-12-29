@@ -156,6 +156,7 @@ pipx ensurepath
 - Check your internet connection
 - Try again after a few seconds (rate limiting)
 - Perplexity may have temporary API limitations
+- The CLI now shows clearer connection/auth errors and times out socket setup after ~10s
 
 ### Installation from source fails
 
@@ -178,6 +179,11 @@ python3 --version  # Should be 3.7+
 # Ubuntu: sudo apt install python3.9
 # Windows: Download from python.org
 ```
+
+### Windows notes
+
+- Interactive mode falls back to simple line input on Windows (no Shift+Enter for newlines); use separate questions instead.
+- ANSI colors should work in modern terminals (PowerShell 7+ / Windows Terminal). If output looks odd, try a different terminal.
 
 ## Contributing
 
