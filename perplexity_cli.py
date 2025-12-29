@@ -24,10 +24,18 @@ from json import loads, dumps
 from random import getrandbits
 from websocket import WebSocketApp
 from requests import Session
+import os
 import subprocess
 import sys
 import signal
-import readline
+
+# readline is optional and missing on Windows; swallow import failure gracefully
+try:  # pragma: no cover - availability depends on platform
+    import readline  # type: ignore
+except ImportError:  # pragma: no cover
+    readline = None
+
+IS_WINDOWS = os.name == "nt"
 
 
 class Perplexity:
@@ -40,19 +48,35 @@ class Perplexity:
         self.session.headers.update(self.user_agent)
         self.t = format(getrandbits(32), "08x")
         URL = f"https://www.perplexity.ai/socket.io/?EIO=4&transport=polling&t={self.t}"
-        self.sid = loads(self.session.get(url=URL).text[1:])["sid"]
+        self.queue = []
+
+        # Socket.io handshake with a modest timeout so we fail fast on bad networks
+        try:
+            handshake_resp = self.session.get(url=URL, timeout=10)
+            handshake_resp.raise_for_status()
+            self.sid = loads(handshake_resp.text[1:])["sid"]
+        except Exception as exc:
+            raise Exception(f"Failed to initialize connection: {exc}")
+
         self.n = 1
         self.base = 420
         self.finished = True
         self.last_uuid = None
         
         # Test the anonymous user authentication
-        auth_response = self.session.post(
-            url=f"https://www.perplexity.ai/socket.io/?EIO=4&transport=polling&t={self.t}&sid={self.sid}",
-            data='40{"jwt":"anonymous-ask-user"}',
-        )
+        auth_url = f"https://www.perplexity.ai/socket.io/?EIO=4&transport=polling&t={self.t}&sid={self.sid}"
+        try:
+            auth_response = self.session.post(
+                url=auth_url,
+                data='40{"jwt":"anonymous-ask-user"}',
+                timeout=10,
+            )
+            auth_response.raise_for_status()
+        except Exception as exc:
+            raise Exception(f"Failed to authenticate anonymous user: {exc}")
+
         if auth_response.text != "OK":
-            raise Exception("Failed to authenticate anonymous user.")
+            raise Exception("Failed to authenticate anonymous user (unexpected response).")
             
         self.ws = self._init_websocket()
         self.ws_thread = Thread(target=self.ws.run_forever).start()
@@ -91,10 +115,14 @@ class Perplexity:
                         self.queue.append(message_data)
                         self.finished = True
             except Exception as e:
-                pass  # Ignore parsing errors
+                # Surface parse errors to the queue for visibility instead of silently dropping
+                self.queue.append({"error": f"Parse error: {e}"})
+                self.finished = True
 
         def on_error(ws, error):
-            pass  # Ignore WebSocket errors
+            # Surface websocket errors so the caller can present useful feedback
+            self.queue.append({"error": str(error)})
+            self.finished = True
 
         cookies = ""
         for key, value in self.session.cookies.get_dict().items():
@@ -273,6 +301,12 @@ def answer_question(question):
 
 def get_multiline_input(prompt_text):
     """Get input with Enter to send, Shift+Enter/Ctrl+Enter for new lines."""
+    if IS_WINDOWS:
+        try:
+            return input(f"{tColor.aqua}> {tColor.reset}").strip()
+        except EOFError:
+            return ""
+
     import sys
     import tty
     import termios
@@ -475,11 +509,12 @@ def process_query(query, count):
         spinner_thread.daemon = True
         spinner_thread.start()
         
-        answer_list = list(Perplexity().generate_answer(query))
-        stop_spinner.set()
-        spinner_thread.join(timeout=0.1)
-        
-        answer, references = extract_answer_from_response(answer_list)
+        try:
+            answer_list = list(Perplexity().generate_answer(query))
+            answer, references = extract_answer_from_response(answer_list)
+        finally:
+            stop_spinner.set()
+            spinner_thread.join(timeout=0.2)
         
         if answer:
             # Clear the search messages before showing response
